@@ -9,10 +9,11 @@ setup(name='bladestorm',
                         'ray',
                         'opencv-python',
                         'numpy',
-                        'tensorboardX'],
+                        'tensorboardX',
+                        'pyzmq'],
       extras_require={
           'dev': [
               'pytest'
-          ]
+          ],
       }
       )

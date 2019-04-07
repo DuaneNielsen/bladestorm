@@ -19,11 +19,14 @@ def single_episode(env, config, policy, v=None, render=False):
 
     episode = []
     episode_length = 0
+    total_reward = 0.0
+
     observation_t0 = env.reset()
     action = config.default_action
     observation_t1, reward, done, info = env.step(action)
     state = config.prepro(observation_t1, observation_t0)
     observation_t0 = observation_t1
+    total_reward += reward
 
     done = False
     while not done:
@@ -42,11 +45,13 @@ def single_episode(env, config, policy, v=None, render=False):
         state = config.prepro(observation_t1, observation_t0)
         observation_t0 = observation_t1
 
+        total_reward += reward
+
         if render:
             env.render(mode='human')
         if v is not None:
             v.render(state)
 
-    return episode
+    return episode, total_reward
 
 

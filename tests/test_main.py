@@ -4,7 +4,10 @@ from data import AdvantageDataset
 from config import LunarLander
 import pytest
 import statistics
-
+import messages
+import uuid
+import threading
+import time
 
 @pytest.fixture
 def config():
@@ -50,3 +53,42 @@ def test_advantage_dataset(config, rollout):
         test_advantage = (all_advantage[i] - mu) / (sigma + 1e-12)
         assert advantage == test_advantage
 
+
+def test_messages_redis():
+
+    class Listener(threading.Thread):
+        def __init__(self):
+            super().__init__()
+            self.t = messages.RedisTransport()
+            self.t.subscribe('testchannel')
+            self.t.handler.register(messages.StopAllMessage, self.stopall)
+
+        def run(self):
+            self.t.listen()
+
+        def stopall(self, msg):
+            assert isinstance(msg, messages.StopAllMessage)
+
+    l = Listener()
+    l.start()
+    t = messages.RedisTransport()
+    m = messages.StopAllMessage(server_uuid=uuid.uuid4())
+    t.publish('testchannel', m)
+    t.publish('testchannel', m)
+    t.publish('testchannel', messages.KillMessage(uuid.uuid4()))
+
+
+def test_message_server():
+    t = messages.RedisTransport()
+    s = messages.Server(t, 'testchannel')
+    s.start()
+    t1 = messages.RedisTransport()
+    assert s.stopped is False
+    time.sleep(1)
+    t1.publish('testchannel', messages.StopAllMessage(uuid.uuid4()))
+    time.sleep(0.2)
+    assert s.stopped
+    t1.publish('testchannel', messages.ResetMessage(uuid.uuid4()))
+    time.sleep(0.2)
+    assert s.stopped is False
+    t1.publish('testchannel', messages.KillMessage(uuid.uuid4()))
