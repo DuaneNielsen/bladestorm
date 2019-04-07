@@ -42,7 +42,6 @@ class MessageDecoder:
         else:
             raise Exception
 
-
 class Transport(ABC):
     def publish(self, queue, msg):
         pass
@@ -66,10 +65,13 @@ class BaseTransport(Transport):
         self.decoder = MessageDecoder()
 
 
+redis_pool = redis.ConnectionPool(host='localhost', port='6379', db=0, max_connections=256)
+
+
 class RedisTransport(BaseTransport):
-    def __init__(self, host='localhost', port=6379, db=0):
+    def __init__(self):
         super().__init__()
-        self.r = redis.Redis(host, port, db)
+        self.r = redis.Redis(connection_pool=redis_pool)
         self.p = self.r.pubsub()
 
     def publish(self, channel, msg):

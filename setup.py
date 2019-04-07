@@ -10,7 +10,9 @@ setup(name='bladestorm',
                         'opencv-python',
                         'numpy',
                         'tensorboardX',
-                        'pyzmq'],
+                        'peewee',
+                        'redis',
+                        'psycopg2-binary'],
       extras_require={
           'dev': [
               'pytest'

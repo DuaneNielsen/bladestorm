@@ -8,28 +8,34 @@ from data import AdvantageDataset
 import torch
 from torch.utils.data import DataLoader
 import math
-from messages import EpisodeMessage, RedisTransport, Server, StopAllMessage, KillMessage
+from messages import EpisodeMessage, RedisTransport, Server, StopAllMessage, KillMessage, ResetMessage
 import uuid
+from peewee import PostgresqlDatabase, Model, CharField, TimestampField, BlobField, FloatField, IntegerField
+import datetime
+from statistics import mean
+import pickle
+import tensorboardX
 
 
 class TensorBoardListener(Server):
-    def __init__(self, transport, config):
+    def __init__(self, transport, name):
         super().__init__(transport, 'rollout')
-        self.config = config
         self.register(EpisodeMessage, self.episode)
-        self.register(StopAllMessage, self.stopAll)
+        self.register(ResetMessage, self.reset)
         self.tb_step = 0
-        self.tb = self.config.getSummaryWriter(config.gym_env_string)
+        self.name = name
+        self.tb = tensorboardX.SummaryWriter(name)
 
     def episode(self, msg):
         self.tb.add_scalar('reward', msg.total_reward, self.tb_step)
         self.tb.add_scalar('epi_len', msg.steps, self.tb_step)
         self.tb_step += 1
 
-    def stopAll(self, msg):
-        super(msg)
-        self.tb_step = 0
-        self.tb = self.config.getSummaryWriter(config.gym_env_string)
+
+class Stat:
+    def __init__(self, total_reward, epi_length):
+        self.total_reward = total_reward
+        self.epi_length = epi_length
 
 
 @ray.remote
@@ -46,13 +52,15 @@ class ExperienceEnv(object):
         self.policy.load_state_dict(policy_weights)
 
         rollout = []
+        stats = []
         for id in range(num_episodes):
             episode, total_reward = single_episode(self.env, self.config, self.policy)
             rollout.append(episode)
             msg = EpisodeMessage(self.uuid, id, len(episode), total_reward)
+            stats.append(Stat(total_reward, len(episode)))
             self.t.publish('rollout', msg)
 
-        return rollout
+        return rollout, stats
 
 
 def ppo_loss(newprob, oldprob, advantage, clip=0.2):
@@ -82,7 +90,7 @@ def train_policy(policy, rollout_dataset, config):
     batches = math.floor(len(rollout_dataset) / config.max_minibatch_size) + 1
     batch_size = math.floor(len(rollout_dataset) / batches)
     steps_per_batch = math.floor(12 / batches) if math.floor(12 / batches) > 0 else 1
-    #config.tb.add_scalar('batches', batches, config.tb_step)
+    # config.tb.add_scalar('batches', batches, config.tb_step)
 
     rollout_loader = DataLoader(rollout_dataset, batch_size=batch_size, shuffle=True)
     batches_p = 0
@@ -122,6 +130,37 @@ def train_policy(policy, rollout_dataset, config):
     #     gpu_profile(frame=sys._getframe(), event='line', arg=None)
 
 
+db = PostgresqlDatabase('testpython', user='ppo', password='password',
+                        host='localhost', port=5432)
+
+
+class BaseModel(Model):
+    """A base model that will use our Postgresql database"""
+
+    class Meta:
+        database = db
+
+
+class PolicyStore(BaseModel):
+    run = CharField()
+    timestamp = TimestampField()
+    ave_reward = FloatField()
+    ave_episode_length = IntegerField()
+    policy = BlobField()
+
+
+class StatsCollector:
+    def __init__(self):
+        self.stats = []
+
+    def append(self, stats):
+        self.stats = self.stats + stats
+
+    def mean_reward(self):
+        return mean([s.total_reward for s in self.stats])
+
+    def mean_episode_length(self):
+        return mean([s.epi_length for s in self.stats])
 
 
 if __name__ == "__main__":
@@ -130,28 +169,45 @@ if __name__ == "__main__":
     config = config.CartPole()
     config.experience_threads = 10
 
+    db.create_tables([PolicyStore])
+
     main_uuid = uuid.uuid4()
     main_t = RedisTransport()
-    tbl = TensorBoardListener(RedisTransport(), config)
+    tbl = TensorBoardListener(RedisTransport(), config.run_dir)
     tbl.start()
 
     policy = PPOWrap(config.features, config.action_map, config.hidden)
-    policy_weights = policy.state_dict()
 
-    experience = []
-    gatherers = [ExperienceEnv.remote(config) for _ in range(config.experience_threads)]
+    for epoch in range(config.num_epochs):
+        print(f'started epoch {epoch}')
+        policy_weights = policy.state_dict()
 
-    for i in range(config.experience_threads):
-        experience.append(gatherers[i].rollout.remote(policy_weights))
+        experience = []
+        gatherers = [ExperienceEnv.remote(config) for _ in range(config.experience_threads)]
 
-    rollout = []
+        for i in range(config.experience_threads):
+            experience.append(gatherers[i].rollout.remote(policy_weights, config.episode_batch_size))
 
-    for i in range(config.experience_threads):
-        ready, waiting = ray.wait(experience)
-        rollout = rollout + ray.get(ready[0])
+        rollout = []
+        stats = StatsCollector()
 
-    dataset = AdvantageDataset(rollout, config.state_transform, config.discount_factor)
+        for i in range(config.experience_threads):
+            ready, waiting = ray.wait(experience)
+            rollout = rollout + ray.get(ready[0][0])
+            stats.append(ray.get(ready[0][1]))
 
-    train_policy(policy, dataset, config)
+        policy_blob = pickle.dumps(policy_weights, 0)
+        pstore = PolicyStore(run=config.run_id,
+                             timestamp=datetime.datetime.now(),
+                             ave_reward=stats.mean_reward(),
+                             ave_episode_length=stats.mean_episode_length(),
+                             policy=policy_blob
+                             )
+        pstore.save()
+
+        print(f'starting training {epoch}')
+        dataset = AdvantageDataset(rollout, config.state_transform, config.discount_factor)
+
+        train_policy(policy, dataset, config)
 
     main_t.publish('rollout', KillMessage(main_uuid))

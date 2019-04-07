@@ -66,12 +66,8 @@ class BaseConfig:
         self.redis_host = 'localhost'
         self.redis_port = '6379'
         self.redis_db = '0'
-
-    def rundir(self, name='default'):
-        return f'runs/{name}_{random.randint(0, 1000)}'
-
-    def getSummaryWriter(self, name='default'):
-        return SummaryWriter(self.rundir(name))
+        self.run_id = f'{self.gym_env_string}_{random.randint(0, 1000)}'
+        self.run_dir = f'runs/{self.run_id}'
 
 
 class DiscreteConfig(BaseConfig):
