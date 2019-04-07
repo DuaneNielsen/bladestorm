@@ -100,3 +100,13 @@ class LunarLander(DiscreteConfig):
         self.adversarial = False
         self.default_save = ['lunar_lander/solved.wgt']
         self.players = 1
+
+
+class CartPole(DiscreteConfig):
+    def __init__(self):
+        super().__init__(
+            gym_env_string='CartPole-v1',
+            action_map=[0, 1]
+        )
+        self.features = 4
+        self.hidden = 3

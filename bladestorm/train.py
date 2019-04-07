@@ -127,7 +127,7 @@ def train_policy(policy, rollout_dataset, config):
 if __name__ == "__main__":
     ray.init(local_mode=True)
 
-    config = config.LunarLander()
+    config = config.CartPole()
     config.experience_threads = 10
 
     main_uuid = uuid.uuid4()
