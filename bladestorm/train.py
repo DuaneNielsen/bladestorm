@@ -10,7 +10,7 @@ from torch.utils.data import DataLoader
 import math
 from messages import EpisodeMessage, RedisTransport, Server, StopAllMessage, KillMessage, ResetMessage
 import uuid
-from peewee import PostgresqlDatabase, Model, CharField, TimestampField, BlobField, FloatField, IntegerField
+from peewee import PostgresqlDatabase, Model, CharField, TimestampField, BlobField, FloatField, IntegerField, Proxy
 import datetime
 from statistics import mean
 import pickle
@@ -130,15 +130,13 @@ def train_policy(policy, rollout_dataset, config):
     #     gpu_profile(frame=sys._getframe(), event='line', arg=None)
 
 
-db = PostgresqlDatabase('testpython', user='ppo', password='password',
-                        host='localhost', port=5432)
+database_proxy = Proxy()
 
 
 class BaseModel(Model):
     """A base model that will use our Postgresql database"""
-
     class Meta:
-        database = db
+        database = database_proxy
 
 
 class PolicyStore(BaseModel):
@@ -163,21 +161,12 @@ class StatsCollector:
         return mean([s.epi_length for s in self.stats])
 
 
-if __name__ == "__main__":
-    ray.init(local_mode=True)
-
-    config = config.CartPole()
-    config.experience_threads = 10
-
-    db.create_tables([PolicyStore])
-
+def main():
     main_uuid = uuid.uuid4()
     main_t = RedisTransport()
     tbl = TensorBoardListener(RedisTransport(), config.run_dir)
     tbl.start()
-
     policy = PPOWrap(config.features, config.action_map, config.hidden)
-
     for epoch in range(config.num_epochs):
         print(f'started epoch {epoch}')
         policy_weights = policy.state_dict()
@@ -209,5 +198,18 @@ if __name__ == "__main__":
         dataset = AdvantageDataset(rollout, config.state_transform, config.discount_factor)
 
         train_policy(policy, dataset, config)
-
     main_t.publish('rollout', KillMessage(main_uuid))
+
+
+if __name__ == "__main__":
+    ray.init(local_mode=True)
+
+    config = config.CartPole()
+    config.experience_threads = 10
+
+    db = PostgresqlDatabase('testpython', user='ppo', password='password',
+                            host='localhost', port=5432)
+    database_proxy.initialize(db)
+    db.create_tables([PolicyStore])
+
+    main()
