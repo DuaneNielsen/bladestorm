@@ -15,6 +15,8 @@ import datetime
 from statistics import mean
 import pickle
 import tensorboardX
+from util import timeit, WorkerInstrument, TimingReport
+import util
 
 
 class TensorBoardListener(Server):
@@ -38,7 +40,14 @@ class Stat:
         self.epi_length = epi_length
 
 
-@ray.remote
+def fib(n):
+    if n == 1:
+        return 1
+    else:
+        return n * fib(n-1)
+
+
+@ray.remote(num_cpus=1)
 class ExperienceEnv(object):
     def __init__(self, config):
         os.environ["OPENBLAS_NUM_THREADS"] = "1"
@@ -48,7 +57,10 @@ class ExperienceEnv(object):
         self.t = RedisTransport()
         self.uuid = uuid.uuid4()
 
-    def rollout(self, policy_weights, num_episodes=2):
+    #@ray.method(num_return_vals=3)
+    def rollout(self, policy_weights, num_episodes=2, instr=None):
+        if instr is not None:
+            instr.worker_start()
         self.policy.load_state_dict(policy_weights)
 
         rollout = []
@@ -60,7 +72,9 @@ class ExperienceEnv(object):
             stats.append(Stat(total_reward, len(episode)))
             self.t.publish('rollout', msg)
 
-        return rollout, stats
+        if instr is not None:
+            instr.worker_return()
+        return rollout, stats, instr
 
 
 def ppo_loss(newprob, oldprob, advantage, clip=0.2):
@@ -81,7 +95,7 @@ def ppo_loss(newprob, oldprob, advantage, clip=0.2):
     min_step *= -1
     return min_step.mean()
 
-
+@timeit
 def train_policy(policy, rollout_dataset, config):
     optim = torch.optim.Adam(lr=1e-4, params=policy.new.parameters())
     policy = policy.train()
@@ -160,8 +174,29 @@ class StatsCollector:
     def mean_episode_length(self):
         return mean([s.epi_length for s in self.stats])
 
+    def total_episode_length(self):
+        return sum([s.epi_length for s in self.stats])
+
+    def __str__(self):
+        return \
+            f"mean reward : {self.mean_reward()}\n" + \
+            f"mean epi_l  : {self.mean_episode_length()}\n" + \
+            f"totl epi_l : {self.total_episode_length()}"
+
+
+def save_policy(policy_weights, stats):
+    policy_blob = pickle.dumps(policy_weights, 0)
+    pstore = PolicyStore(run=config.run_id,
+                         timestamp=datetime.datetime.now(),
+                         ave_reward=stats.mean_reward(),
+                         ave_episode_length=stats.mean_episode_length(),
+                         policy=policy_blob
+                         )
+    pstore.save()
+
 
 def main():
+    global steps
     main_uuid = uuid.uuid4()
     main_t = RedisTransport()
     tbl = TensorBoardListener(RedisTransport(), config.run_dir)
@@ -169,30 +204,10 @@ def main():
     policy = PPOWrap(config.features, config.action_map, config.hidden)
     for epoch in range(config.num_epochs):
         print(f'started epoch {epoch}')
-        policy_weights = policy.state_dict()
-
-        experience = []
-        gatherers = [ExperienceEnv.remote(config) for _ in range(config.experience_threads)]
-
-        for i in range(config.experience_threads):
-            experience.append(gatherers[i].rollout.remote(policy_weights, config.episode_batch_size))
-
-        rollout = []
-        stats = StatsCollector()
-
-        for i in range(config.experience_threads):
-            ready, waiting = ray.wait(experience)
-            rollout = rollout + ray.get(ready[0][0])
-            stats.append(ray.get(ready[0][1]))
-
-        policy_blob = pickle.dumps(policy_weights, 0)
-        pstore = PolicyStore(run=config.run_id,
-                             timestamp=datetime.datetime.now(),
-                             ave_reward=stats.mean_reward(),
-                             ave_episode_length=stats.mean_episode_length(),
-                             policy=policy_blob
-                             )
-        pstore.save()
+        policy_weights, rollout, stats = multi_rollout(policy)
+        print(stats)
+        steps += stats.total_episode_length()
+        save_policy(policy_weights, stats)
 
         print(f'starting training {epoch}')
         dataset = AdvantageDataset(rollout, config.state_transform, config.discount_factor)
@@ -200,16 +215,60 @@ def main():
         train_policy(policy, dataset, config)
     main_t.publish('rollout', KillMessage(main_uuid))
 
+@timeit
+def multi_rollout(policy):
+    policy_weights = policy.state_dict()
+    experience = []
+    gatherers = [ExperienceEnv.remote(config) for _ in range(config.experience_threads)]
+    for i in range(config.experience_threads):
+        instr = WorkerInstrument()
+        instr.main_start()
+        experience.append(gatherers[i].rollout.remote(policy_weights, config.episode_batch_size, instr))
+    rollout = []
+    stats = StatsCollector()
+    for i in range(config.experience_threads):
+        ready, waiting = ray.wait(experience)
+        w_rollout, w_stats, instr_r = ray.get(ready[0])
+        instr_r.main_stop()
+        timings.append(instr_r)
+        rollout = rollout + w_rollout
+        stats.append(w_stats)
+    return policy_weights, rollout, stats
+
 
 if __name__ == "__main__":
-    ray.init(local_mode=True)
+    local_mode = False
+    ray.init(local_mode=local_mode)
 
-    config = config.CartPole()
-    config.experience_threads = 10
+    config = config.LunarLander()
+    config.experience_threads = 1
+    config.num_epochs = 10
+    config.episode_batch_size = 40
+
+    steps = 0
 
     db = PostgresqlDatabase('testpython', user='ppo', password='password',
                             host='localhost', port=5432)
     database_proxy.initialize(db)
     db.create_tables([PolicyStore])
 
+    timings = TimingReport()
+
+    total_time = util.SimpleInstrument()
+    total_time.start()
+
     main()
+
+    total_time.end()
+    total_time_report = util.SimpleReport()
+    total_time_report.append(total_time)
+
+    print(f'local {local_mode} threads {config.experience_threads} epochs {config.num_epochs} episodes {config.episode_batch_size} steps {steps}')
+    total_time_report.dump()
+    timings.dump()
+    # import sys
+    # import pstats
+    # ps = pstats.Stats(prof, stream=sys.stdout)
+    # ps.print_stats()
+    # filename = 'profile.prof'  # You can change this if needed
+    # prof.dump_stats(filename)

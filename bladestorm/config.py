@@ -43,7 +43,7 @@ class BaseConfig:
         self.state_transform = state_transform
         self.action_transform = action_transform
         self.episode_batch_size = 10
-        self.experience_threads = 10
+        self.experience_threads = 3
         self.print_tensor_sizes = True
         self.last_tensor_sizes = set()
         self.gpu_profile = False
