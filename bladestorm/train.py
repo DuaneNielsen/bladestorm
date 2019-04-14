@@ -17,6 +17,7 @@ import pickle
 import tensorboardX
 from util import timeit, WorkerInstrument, TimingReport
 import util
+import ray.services
 
 
 class TensorBoardListener(Server):
@@ -50,6 +51,7 @@ def fib(n):
 @ray.remote(num_cpus=1)
 class ExperienceEnv(object):
     def __init__(self, config):
+        print(ray.services.get_node_ip_address())
         os.environ["OPENBLAS_NUM_THREADS"] = "1"
         self.config = config
         self.policy = PPOWrap(config.features, config.action_map, config.hidden)
@@ -57,7 +59,7 @@ class ExperienceEnv(object):
         self.t = RedisTransport()
         self.uuid = uuid.uuid4()
 
-    #@ray.method(num_return_vals=3)
+    @ray.method(num_return_vals=3)
     def rollout(self, policy_weights, num_episodes=2, instr=None):
         if instr is not None:
             instr.worker_start()
@@ -238,7 +240,8 @@ def multi_rollout(policy):
 
 if __name__ == "__main__":
     local_mode = False
-    ray.init(local_mode=local_mode)
+    redis_addr= "10.152.183.234:6379"
+    ray.init(redis_address=redis_addr)
 
     config = config.LunarLander()
     config.experience_threads = 1
