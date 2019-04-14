@@ -1,14 +1,12 @@
 import ray
 import config
+from actors import ExperienceEnv
 from models.fully_connected import PPOWrap
-import os
-import gym
-from rollout import single_episode
 from data import AdvantageDataset
 import torch
 from torch.utils.data import DataLoader
 import math
-from messages import EpisodeMessage, RedisTransport, Server, StopAllMessage, KillMessage, ResetMessage
+from messages import EpisodeMessage, RedisTransport, Server, KillMessage, ResetMessage
 import uuid
 from peewee import PostgresqlDatabase, Model, CharField, TimestampField, BlobField, FloatField, IntegerField, Proxy
 import datetime
@@ -35,48 +33,11 @@ class TensorBoardListener(Server):
         self.tb_step += 1
 
 
-class Stat:
-    def __init__(self, total_reward, epi_length):
-        self.total_reward = total_reward
-        self.epi_length = epi_length
-
-
 def fib(n):
     if n == 1:
         return 1
     else:
         return n * fib(n-1)
-
-
-@ray.remote(num_cpus=1)
-class ExperienceEnv(object):
-    def __init__(self, config):
-        print(ray.services.get_node_ip_address())
-        os.environ["OPENBLAS_NUM_THREADS"] = "1"
-        self.config = config
-        self.policy = PPOWrap(config.features, config.action_map, config.hidden)
-        self.env = gym.make(config.gym_env_string)
-        self.t = RedisTransport()
-        self.uuid = uuid.uuid4()
-
-    @ray.method(num_return_vals=3)
-    def rollout(self, policy_weights, num_episodes=2, instr=None):
-        if instr is not None:
-            instr.worker_start()
-        self.policy.load_state_dict(policy_weights)
-
-        rollout = []
-        stats = []
-        for id in range(num_episodes):
-            episode, total_reward = single_episode(self.env, self.config, self.policy)
-            rollout.append(episode)
-            msg = EpisodeMessage(self.uuid, id, len(episode), total_reward)
-            stats.append(Stat(total_reward, len(episode)))
-            self.t.publish('rollout', msg)
-
-        if instr is not None:
-            instr.worker_return()
-        return rollout, stats, instr
 
 
 def ppo_loss(newprob, oldprob, advantage, clip=0.2):
@@ -269,9 +230,9 @@ if __name__ == "__main__":
     print(f'local {local_mode} threads {config.experience_threads} epochs {config.num_epochs} episodes {config.episode_batch_size} steps {steps}')
     total_time_report.dump()
     timings.dump()
-    # import sys
-    # import pstats
-    # ps = pstats.Stats(prof, stream=sys.stdout)
-    # ps.print_stats()
-    # filename = 'profile.prof'  # You can change this if needed
-    # prof.dump_stats(filename)
+        # import sys
+        # import pstats
+        # ps = pstats.Stats(prof, stream=sys.stdout)
+        # ps.print_stats()
+        # filename = 'profile.prof'  # You can change this if needed
+        # prof.dump_stats(filename)
