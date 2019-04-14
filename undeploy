@@ -1,0 +1,2 @@
+kubectl delete deployment.apps/ray-worker
+kubectl delete deployment.apps/ray-head

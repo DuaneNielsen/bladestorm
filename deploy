@@ -1,0 +1,2 @@
+kubectl apply -f kubernetes/head.yaml
+kubectl apply -f kubernetes/worker.yaml
